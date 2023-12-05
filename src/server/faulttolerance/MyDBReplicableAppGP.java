@@ -1,18 +1,25 @@
 package server.faulttolerance;
 
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.HashSet;
+import java.util.Set;
+
+import org.json.JSONObject;
+
 import com.datastax.driver.core.Cluster;
+import com.datastax.driver.core.ResultSet;
+import com.datastax.driver.core.Row;
+import com.datastax.driver.core.Session;
+
 import edu.umass.cs.gigapaxos.interfaces.Replicable;
 import edu.umass.cs.gigapaxos.interfaces.Request;
 import edu.umass.cs.nio.interfaces.IntegerPacketType;
-import edu.umass.cs.nio.interfaces.NodeConfig;
-import edu.umass.cs.nio.nioutils.NIOHeader;
-import edu.umass.cs.nio.nioutils.NodeConfigUtils;
 import edu.umass.cs.reconfiguration.reconfigurationutils.RequestParseException;
-
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.util.HashSet;
-import java.util.Set;
 
 /**
  * This class should implement your {@link Replicable} database app if you wish
@@ -59,9 +66,16 @@ public class MyDBReplicableAppGP implements Replicable {
 	 *             Optional args[1] and args[2]
 	 * @throws IOException
 	 */
+	Cluster cluster;
+	Session session;
+	String keyspace;
+
 	public MyDBReplicableAppGP(String[] args) throws IOException {
 		// TODO: setup connection to the data store and keyspace
-		throw new RuntimeException("Not yet implemented");
+		this.keyspace = args[0];
+		this.cluster = Cluster.builder().addContactPoint("127.0.0.1").build();
+		this.session = cluster.connect(keyspace);
+		System.out.println(System.getProperty("GIGAPAXOS_DATA_DIR"));
 	}
 
 	/**
@@ -78,7 +92,19 @@ public class MyDBReplicableAppGP implements Replicable {
 	@Override
 	public boolean execute(Request request, boolean b) {
 		// TODO: submit request to data store
-		throw new RuntimeException("Not yet implemented");
+		try {
+			System.out.println("execute() started");
+			String queryJson = request.toString();
+			JSONObject json = new JSONObject(queryJson);
+			String query = json.getString("QV");
+			session.execute(query);
+			System.out.println("execute() ended");
+			return true;
+		} catch (Exception e) {
+			System.out.println("Error executing request");
+			return false;
+		}
+
 	}
 
 	/**
@@ -90,8 +116,19 @@ public class MyDBReplicableAppGP implements Replicable {
 	 */
 	@Override
 	public boolean execute(Request request) {
-		// TODO: execute the request by sending it to the data store
-		throw new RuntimeException("Not yet implemented");
+		try {
+			System.out.println("execute() started");
+			String queryJson = request.toString();
+			JSONObject json = new JSONObject(queryJson);
+			String query = json.getString("QV");
+			session.execute(query);
+			System.out.println("execute() ended");
+			return true;
+		} catch (Exception e) {
+			System.out.println("Error executing request");
+			return false;
+		}
+
 	}
 
 	/**
@@ -101,9 +138,52 @@ public class MyDBReplicableAppGP implements Replicable {
 	 * @return
 	 */
 	@Override
-	public String checkpoint(String s) {
-		// TODO:
-		throw new RuntimeException("Not yet implemented");
+	public String checkpoint(String name) {
+		// Create a snapshot of the Cassandra keyspace
+		System.out.println("checkpoint() started");
+		System.out.println("Checkpoint creating:" + name);
+		String snapshotName = "snapshot_" + name;
+		try {
+			saveSnapshot(snapshotName);
+		} catch (IOException | InterruptedException e) {
+			System.out.println("Checkpoint Fail");
+		}
+
+		System.out.println("checkpoint() ended");
+		return snapshotName;
+	}
+
+	public void saveSnapshot(String snapshotName) throws IOException, InterruptedException {
+		// Assuming you have nodetool accessible in the system path.
+
+		System.out.println("saveSnapshot() started");
+		// String command = "nodetool snapshot -t " + snapshotName + " " + keyspace;
+
+		// Process process = Runtime.getRuntime().exec(command);
+		// int exitCode = process.waitFor();
+
+		// if (exitCode != 0) {
+		// throw new IOException("Snapshot creation failed with exit code " + exitCode);
+		// }
+		String tableName = "temp";
+		String query = "SELECT * FROM " + keyspace + "." + tableName;
+		ResultSet results = session.execute(query);
+
+		String currentDirectory = System.getProperty("user.dir");
+		System.out.println("Current working directory: " + currentDirectory);
+
+		try (BufferedWriter writer = new BufferedWriter(new FileWriter("backup.csv"))) {
+			for (Row row : results) {
+				// Example: Assuming the table has two columns 'id' and 'value'
+				writer.write(row.getInt("id") + "," + row.getString("value"));
+				writer.newLine();
+			}
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+
+		System.out.println("Snapshot " + snapshotName + " created for keyspace " + keyspace);
+		System.out.println("saveSnapshot() ended");
 	}
 
 	/**
@@ -113,13 +193,57 @@ public class MyDBReplicableAppGP implements Replicable {
 	 * @param s1
 	 * @return
 	 */
-	@Override
-	public boolean restore(String s, String s1) {
-		// TODO:
-		throw new RuntimeException("Not yet implemented");
 
+	@Override
+	public boolean restore(String name, String state) {
+		System.out.println("restore() started");
+		try {
+			if (recoverSnapshot("backup_" + name)) {
+				System.out.println("Restoring:" + name);
+			}
+		} catch (Exception e) {
+			System.out.println("Restore Fail: " + e.getMessage());
+			e.printStackTrace();
+			return false;
+		}
+
+		System.out.println("restore() ended");
+		return true; // Restoration successful
 	}
 
+	private boolean recoverSnapshot(String backupName) throws IOException {
+		System.out.println("recoverSnapshot() started");
+		String backupFilePath = System.getProperty("user.dir") + "/backup.csv";
+
+		// Check if the backup file exists
+		File backupFile = new File(backupFilePath);
+		if (!backupFile.exists()) {
+			System.out.println("Backup file does not exist: " + backupFilePath);
+			return false;
+		}
+
+		// Read data from the backup file and insert it into the table
+		try (BufferedReader reader = new BufferedReader(new FileReader(backupFile))) {
+			String line;
+			while ((line = reader.readLine()) != null) {
+				// Assuming the backup CSV is in the format: id,value,...
+				// You need to tailor this to your table's schema
+				String[] values = line.split(",");
+				String tableName = "temp";
+				String insertCQL = "INSERT INTO " + keyspace + "." + tableName
+						+ " (id, value) VALUES (" + values[0] + ", '" + values[1] + "')";
+				session.execute(insertCQL);
+			}
+		} catch (Exception e) {
+			System.out.println("Error during restoration: " + e.getMessage());
+			e.printStackTrace();
+			return false;
+		}
+
+		System.out.println("Restored keyspace " + keyspace + " from backup " + backupName);
+		System.out.println("recoverSnapshot() ended");
+		return true;
+	}
 
 	/**
 	 * No request types other than {@link edu.umass.cs.gigapaxos.paxospackets
@@ -137,11 +261,13 @@ public class MyDBReplicableAppGP implements Replicable {
 
 	/**
 	 * @return Return all integer packet types used by this application. For an
-	 * example of how to define your own IntegerPacketType enum, refer {@link
-	 * edu.umass.cs.reconfiguration.examples.AppRequest}. This method does not
-	 * need to be implemented because the assignment Grader will only use
-	 * {@link
-	 * edu.umass.cs.gigapaxos.paxospackets.RequestPacket} packets.
+	 *         example of how to define your own IntegerPacketType enum, refer
+	 *         {@link
+	 *         edu.umass.cs.reconfiguration.examples.AppRequest}. This method does
+	 *         not
+	 *         need to be implemented because the assignment Grader will only use
+	 *         {@link
+	 *         edu.umass.cs.gigapaxos.paxospackets.RequestPacket} packets.
 	 */
 	@Override
 	public Set<IntegerPacketType> getRequestTypes() {
