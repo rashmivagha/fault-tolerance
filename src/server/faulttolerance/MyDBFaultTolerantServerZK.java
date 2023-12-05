@@ -49,6 +49,10 @@ import server.ReplicatedServer;
  * {@link #MAX_LOG_SIZE} requests.
  */
 public class MyDBFaultTolerantServerZK extends server.MyDBSingleServer {
+    private ZooKeeper zk;
+    private String myID;
+    private String leaderID;
+    private static final String LEADER_ELECTION_ZNODE = "/leader_election";
 
 	/**
 	 * Set this value to as small a value with which you can get tests to still
